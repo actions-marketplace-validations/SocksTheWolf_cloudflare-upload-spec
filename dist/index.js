@@ -1,6 +1,6 @@
 import * as os from 'os';
 import os__default from 'os';
-import 'crypto';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { promises } from 'fs';
 import { resolve } from 'path';
@@ -158,6 +158,36 @@ function escapeProperty(s) {
         .replace(/\n/g, '%0A')
         .replace(/:/g, '%3A')
         .replace(/,/g, '%2C');
+}
+
+// For internal use, subject to change.
+// We use any as a valid input type
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function issueFileCommand(command, message) {
+    const filePath = process.env[`GITHUB_${command}`];
+    if (!filePath) {
+        throw new Error(`Unable to find environment variable for file command ${command}`);
+    }
+    if (!fs.existsSync(filePath)) {
+        throw new Error(`Missing file at path: ${filePath}`);
+    }
+    fs.appendFileSync(filePath, `${toCommandValue(message)}${os.EOL}`, {
+        encoding: 'utf8'
+    });
+}
+function prepareKeyValueMessage(key, value) {
+    const delimiter = `ghadelimiter_${crypto.randomUUID()}`;
+    const convertedValue = toCommandValue(value);
+    // These should realistically never happen, but just in case someone finds a
+    // way to exploit uuid generation let's not allow keys or values that contain
+    // the delimiter.
+    if (key.includes(delimiter)) {
+        throw new Error(`Unexpected input: name should not contain the delimiter "${delimiter}"`);
+    }
+    if (convertedValue.includes(delimiter)) {
+        throw new Error(`Unexpected input: value should not contain the delimiter "${delimiter}"`);
+    }
+    return `${key}<<${delimiter}${os.EOL}${convertedValue}${os.EOL}${delimiter}`;
 }
 
 var tunnel$1 = {};
@@ -38217,6 +38247,21 @@ function getInput(name, options) {
     const val = process.env[`INPUT_${name.replace(/ /g, '_').toUpperCase()}`] || '';
     return val.trim();
 }
+/**
+ * Sets the value of an output.
+ *
+ * @param     name     name of the output to set
+ * @param     value    value to store. Non-string values will be converted to a string via JSON.stringify
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function setOutput(name, value) {
+    const filePath = process.env['GITHUB_OUTPUT'] || '';
+    if (filePath) {
+        return issueFileCommand('OUTPUT', prepareKeyValueMessage(name, value));
+    }
+    process.stdout.write(os.EOL);
+    issueCommand('set-output', { name }, toCommandValue(value));
+}
 //-----------------------------------------------------------------------
 // Results
 //-----------------------------------------------------------------------
@@ -38244,14 +38289,6 @@ function error(message, properties = {}) {
  */
 function warning(message, properties = {}) {
     issueCommand('warning', toCommandProperties(properties), message instanceof Error ? message.toString() : message);
-}
-/**
- * Adds a notice issue
- * @param message notice issue message. Errors will be converted to string via toString()
- * @param properties optional properties to add to the annotation.
- */
-function notice(message, properties = {}) {
-    issueCommand('notice', toCommandProperties(properties), message instanceof Error ? message.toString() : message);
 }
 /**
  * Writes info to log with console.log.
@@ -38308,24 +38345,30 @@ async function run() {
       method: "POST",
       body: JSON.stringify(schema_payload)
     });
-    if (api_shield_upload_resp.ok) {
-      const data = await api_shield_upload_resp.json();
-      if (data.success) {
-        // save out the new schema's id, we want to make sure we don't delete it
-        new_schema_key = data.result.schema_id;
-        info(`uploaded new schema ${new_schema_key}`);
-      } else {
-        setFailed("failed to upload to the API Shield");
-        return;
-      }
+    const upload_data = await api_shield_upload_resp.json();
+    if (api_shield_upload_resp.ok && upload_data.success) {
+      // save out the new schema's id, we want to make sure we don't delete it
+      new_schema_key = upload_data.result.schema_id;
+      info(`uploaded new schema ${new_schema_key}`);
     } else {
-      setFailed(`Unable to upload to API Shield, got error ${api_shield_upload_resp.status}`);
+      let errorArray = [];
+      upload_data.errors.forEach((itm) => {
+        let msg = `${itm.code} - ${itm.message}`;
+        if (itm.source !== undefined) {
+          msg += ` in ${JSON.stringify(itm.source)}`;
+        }
+        errorArray.push(msg);
+      });
+      const multiLineError = errorArray.join("\n");
+      setFailed(`Unable to upload to API Shield, error code: ${api_shield_upload_resp.status}, reasons:\n${multiLineError}`);
+      setOutput("schema_errors", multiLineError);
       return;
     }
+    setOutput("schema_errors", "");
 
     // if we are not to download the other schemas, then end the task asap
     if (!delete_others) {
-      notice("task complete");
+      setOutput("schemas_deleted", 0);
       return;
     }
 
@@ -38353,18 +38396,18 @@ async function run() {
         }
       }
     } else {
-      setFailed(`Could not get other upload schemas, got error ${get_uploaded_schemas.status}`);
+      setFailed(`Could not get other API schemas, got error ${get_uploaded_schemas.status}`);
       return;
     }
 
     // if there are no other schemas to manage, then end the task
     if (other_schemas.length == 0) {
-      notice("task complete");
+      setOutput("schemas_deleted", 0);
       return;
     }
 
     // otherwise, march through and delete the other schemas
-    let failed_delete = false;
+    let failed_delete = false, deleted_schemas = 0;
     info(`attempting to delete ${other_schemas.length} other schemas...`);
     for (const schema_id of other_schemas) {
       failed_delete = false;
@@ -38390,9 +38433,11 @@ async function run() {
           setFailed(`failed to delete ${schema_id}, exiting!!`);
           return;
         }
+      } else {
+        ++deleted_schemas;
       }
     }
-    notice("task complete");
+    setOutput("schemas_deleted", deleted_schemas);
   } catch (error) {
     if (error instanceof Error) setFailed(error.message);
   }

@@ -19,7 +19,7 @@ inputs:
     description: The specification's file name
     default: "openapi.json"
   delete_others:
-    description: Deletes other specs that match this name
+    description: Deletes other specs that match the same name as the value in `file_name`
     default: true
   skip_failed_deletes:
     description: If we fail to delete a spec, should we continue the task?
@@ -27,6 +27,12 @@ inputs:
   enable:
     description: If this new spec should be enabled automatically
     default: true
+
+outputs:
+  schema_errors:
+    description: "errors while processing/parsing the openapi schema"
+  schemas_deleted:
+    description: "number of schemas that were deleted if enabled"
 
 runs:
   using: node24

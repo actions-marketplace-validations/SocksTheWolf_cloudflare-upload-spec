@@ -49,24 +49,30 @@ export async function run() {
       method: "POST",
       body: JSON.stringify(schema_payload)
     });
-    if (api_shield_upload_resp.ok) {
-      const data = await api_shield_upload_resp.json();
-      if (data.success) {
-        // save out the new schema's id, we want to make sure we don't delete it
-        new_schema_key = data.result.schema_id;
-        core.info(`uploaded new schema ${new_schema_key}`);
-      } else {
-        core.setFailed("failed to upload to the API Shield");
-        return;
-      }
+    const upload_data = await api_shield_upload_resp.json();
+    if (api_shield_upload_resp.ok && upload_data.success) {
+      // save out the new schema's id, we want to make sure we don't delete it
+      new_schema_key = upload_data.result.schema_id;
+      core.info(`uploaded new schema ${new_schema_key}`);
     } else {
-      core.setFailed(`Unable to upload to API Shield, got error ${api_shield_upload_resp.status}`);
+      let errorArray = [];
+      upload_data.errors.forEach((itm) => {
+        let msg = `${itm.code} - ${itm.message}`;
+        if (itm.source !== undefined) {
+          msg += ` in ${JSON.stringify(itm.source)}`;
+        }
+        errorArray.push(msg);
+      });
+      const multiLineError = errorArray.join("\n");
+      core.setFailed(`Unable to upload to API Shield, error code: ${api_shield_upload_resp.status}, reasons:\n${multiLineError}`);
+      core.setOutput("schema_errors", multiLineError);
       return;
     }
+    core.setOutput("schema_errors", "");
 
     // if we are not to download the other schemas, then end the task asap
     if (!delete_others) {
-      core.notice("task complete");
+      core.setOutput("schemas_deleted", 0);
       return;
     }
 
@@ -94,18 +100,18 @@ export async function run() {
         }
       }
     } else {
-      core.setFailed(`Could not get other upload schemas, got error ${get_uploaded_schemas.status}`);
+      core.setFailed(`Could not get other API schemas, got error ${get_uploaded_schemas.status}`);
       return;
     }
 
     // if there are no other schemas to manage, then end the task
     if (other_schemas.length == 0) {
-      core.notice("task complete");
+      core.setOutput("schemas_deleted", 0);
       return;
     }
 
     // otherwise, march through and delete the other schemas
-    let failed_delete = false;
+    let failed_delete = false, deleted_schemas = 0;
     core.info(`attempting to delete ${other_schemas.length} other schemas...`);
     for (const schema_id of other_schemas) {
       failed_delete = false;
@@ -131,9 +137,11 @@ export async function run() {
           core.setFailed(`failed to delete ${schema_id}, exiting!!`);
           return;
         }
+      } else {
+        ++deleted_schemas;
       }
     }
-    core.notice("task complete");
+    core.setOutput("schemas_deleted", deleted_schemas);
   } catch (error) {
     if (error instanceof Error) core.setFailed(error.message)
   }
